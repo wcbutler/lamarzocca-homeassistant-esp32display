@@ -1,0 +1,328 @@
+substitutions:
+  device_name: marzocco-controller
+  max_cups_per_tank: "65"
+
+esphome:
+  name: ${device_name}
+  friendly_name: La Marzocco Controller
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+logger:
+  baud_rate: 0
+
+api:
+
+wifi:
+  networks:
+    - ssid: !secret wifi_ssid_primary
+      password: !secret wifi_password_primary
+    - ssid: !secret wifi_ssid_fallback
+      password: !secret wifi_password_fallback
+
+  ap:
+    ssid: "${device_name} Fallback"
+    password: "esphome123"
+
+captive_portal:
+
+# =========================
+# GLOBAL STATE
+# =========================
+globals:
+  - id: screen_index
+    type: int
+    restore_value: yes
+    initial_value: "0"
+
+  - id: last_activity_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+
+  - id: shot_timer_value
+    type: std::string
+    restore_value: no
+    initial_value: '"0"'
+
+  - id: last_update_time
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+
+  # Cups per tank
+  - id: cups_used
+    type: int
+    restore_value: yes
+    initial_value: "0"
+
+  # Lifetime counter
+  - id: lifetime_cups
+    type: uint32_t
+    restore_value: yes
+    initial_value: "0"
+
+# =========================
+# BATTERY (LOW ONLY)
+# =========================
+sensor:
+  - platform: adc
+    pin: GPIO34
+    id: battery_voltage
+    attenuation: 12dB
+    update_interval: 10s
+    filters:
+      - multiply: 2.0
+
+  - platform: template
+    id: battery_low
+    update_interval: 10s
+    lambda: |-
+      return id(battery_voltage).state < 3.4;
+
+  - platform: wifi_signal
+    id: wifi_rssi
+    update_interval: 20s
+
+# =========================
+# HOME ASSISTANT INPUTS
+# =========================
+text_sensor:
+  - platform: homeassistant
+    id: shot_timer_sensor
+    entity_id: sensor.xxxxxxx_shot_timer
+    on_value:
+      then:
+        - lambda: |-
+            id(last_activity_ms) = millis();
+
+            int s = atoi(x.c_str());
+            if (s == 1 && millis() - id(last_update_time) > 5000) {
+              id(cups_used)++;
+              id(lifetime_cups)++;
+            }
+
+            id(shot_timer_value) = x;
+            id(last_update_time) = millis();
+
+  - platform: homeassistant
+    id: boiler_temp
+    entity_id: sensor.xxxxxxxx_current_coffee_temperature
+
+binary_sensor:
+  # Upper button → LEFT
+  - platform: gpio
+    id: button_left
+    pin:
+      number: GPIO35
+      inverted: true
+    on_press:
+      then:
+        - lambda: |-
+            id(last_activity_ms) = millis();
+            id(screen_index)--;
+            if (id(screen_index) < 0) id(screen_index) = 3;
+
+  # Lower button → RIGHT
+  - platform: gpio
+    id: button_right
+    pin:
+      number: GPIO0
+      inverted: true
+      mode: INPUT_PULLUP
+    on_press:
+      then:
+        - lambda: |-
+            id(last_activity_ms) = millis();
+            id(screen_index)++;
+            if (id(screen_index) > 3) id(screen_index) = 0;
+
+  # BOTH buttons held 3s → reset cups-used counter
+  - platform: template
+    id: reset_combo
+    lambda: |-
+      return id(button_left).state && id(button_right).state;
+    on_press:
+      then:
+        - delay: 3s
+        - if:
+            condition:
+              lambda: |-
+                return id(button_left).state && id(button_right).state;
+            then:
+              - lambda: |-
+                  id(cups_used) = 0;
+
+  - platform: homeassistant
+    id: machine_power
+    entity_id: switch.xxxxxxxx
+
+  - platform: homeassistant
+    id: steam_boiler
+    entity_id: switch.xxxxxxx_steam_boiler
+
+  - platform: homeassistant
+    id: water_tank_empty
+    entity_id: binary_sensor.xxxxxxxx_water_tank_empty
+    on_press:
+      then:
+        - lambda: |-
+            id(cups_used) = 0;
+
+# =========================
+# IMAGE (LOGO)
+# =========================
+image:
+  - file: images/image.png
+    id: lm_logo
+    resize: 40x40
+    type: RGB
+
+# =========================
+# DISPLAY
+# =========================
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO19
+
+font:
+  - file:
+      type: gfonts
+      family: Lato
+      weight: 700
+    id: header
+    size: 18
+
+  - file:
+      type: gfonts
+      family: Lato
+      weight: 400
+    id: body
+    size: 16
+
+  - file:
+      type: gfonts
+      family: Lato
+      weight: 700
+    id: timer
+    size: 36
+
+color:
+  - id: WHITE
+    red: 100%
+    green: 100%
+    blue: 100%
+  - id: GREEN
+    red: 0%
+    green: 100%
+    blue: 0%
+  - id: ORANGE
+    red: 100%
+    green: 65%
+    blue: 0%
+  - id: RED
+    red: 100%
+    green: 0%
+    blue: 0%
+  - id: BLACK
+    red: 0%
+    green: 0%
+    blue: 0%
+
+display:
+  - platform: st7789v
+    model: TTGO_TDISPLAY_135X240
+    cs_pin: GPIO5
+    dc_pin: GPIO16
+    reset_pin: GPIO23
+    rotation: 90
+    update_interval: 1s
+    lambda: |-
+
+      // ==================================
+      // SCREEN BLANKING (MACHINE OFF + IDLE)
+      // ==================================
+      if (!id(machine_power).state &&
+          millis() - id(last_activity_ms) > 30000) {
+        it.fill(BLACK);
+        return;
+      }
+
+      int cups_left = ${max_cups_per_tank} - id(cups_used);
+      if (cups_left < 0) cups_left = 0;
+
+      // WiFi indicator
+      it.printf(200, 0, id(body),
+                wifi::global_wifi_component->is_connected() ? GREEN : RED,
+                wifi::global_wifi_component->is_connected() ? "WiFi" : "NoWiFi");
+
+      // SCREEN 0 — MAIN
+      if (id(screen_index) == 0) {
+        it.printf(5, 0, id(header), WHITE,
+                  "La Marzocco Linea Micra");
+
+        it.printf(5, 22, id(body), WHITE,
+                  "Boiler: %.1f C",
+                  atof(id(boiler_temp).state.c_str()));
+
+        it.printf(5, 40, id(body), WHITE,
+                  "Steam: %s",
+                  id(steam_boiler).state ? "ON" : "OFF");
+
+        it.printf(5, 58, id(body),
+                  id(machine_power).state ? GREEN : ORANGE,
+                  "Power: %s",
+                  id(machine_power).state ? "ON" : "OFF");
+
+        it.printf(5, 76, id(body), WHITE,
+                  "Cups left: %d", cups_left);
+
+        if (id(battery_low).state) {
+          it.printf(5, 94, id(body), RED, "LOW BATTERY");
+        }
+
+        int sec = atoi(id(shot_timer_value).c_str());
+        if (millis() - id(last_update_time) < 5000 && sec > 0) {
+          it.printf(5, 115, id(timer), GREEN, "%d", sec);
+        } else {
+          it.printf(5, 115, id(header), ORANGE, "READY");
+        }
+
+        it.image(190, 100, id(lm_logo));
+      }
+
+      // SCREEN 1 — NETWORK
+      if (id(screen_index) == 1) {
+        it.printf(5, 0, id(header), WHITE, "Network");
+        it.printf(5, 30, id(body), WHITE,
+                  wifi::global_wifi_component->is_connected() ? "Connected" : "Offline");
+        it.printf(5, 50, id(body), WHITE,
+                  "RSSI: %.0f dBm", id(wifi_rssi).state);
+      }
+
+      // SCREEN 2 — HEAT STATUS
+      if (id(screen_index) == 2) {
+        float t = atof(id(boiler_temp).state.c_str());
+        it.printf(5, 0, id(header), WHITE, "Heat Status");
+        it.printf(5, 45, id(timer),
+                  t >= 90 ? GREEN : ORANGE,
+                  "%.1f", t);
+        it.printf(5, 105, id(header), WHITE,
+                  t >= 90 ? "READY" : "HEATING...");
+      }
+
+      // SCREEN 3 — STATS
+      if (id(screen_index) == 3) {
+        it.printf(5, 0, id(header), WHITE, "Statistics");
+        it.printf(5, 30, id(body), WHITE,
+                  "Cups left: %d", cups_left);
+        it.printf(5, 50, id(body), WHITE,
+                  "Lifetime cups: %u", id(lifetime_cups));
+        it.printf(5, 80, id(body), ORANGE,
+                  "Hold BOTH buttons");
+        it.printf(5, 100, id(body), ORANGE,
+                  "to reset cups");
+      }
