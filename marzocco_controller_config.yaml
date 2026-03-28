@@ -22,16 +22,15 @@ wifi:
       password: !secret wifi_password_primary
     - ssid: !secret wifi_ssid_fallback
       password: !secret wifi_password_fallback
-
   ap:
     ssid: "${device_name} Fallback"
     password: "esphome123"
 
 captive_portal:
 
-# =========================
+# =====================================================
 # GLOBAL STATE
-# =========================
+# =====================================================
 globals:
   - id: screen_index
     type: int
@@ -53,21 +52,21 @@ globals:
     restore_value: no
     initial_value: "0"
 
-  # Cups per tank
+  # Cups used this tank
   - id: cups_used
     type: int
     restore_value: yes
     initial_value: "0"
 
-  # Lifetime counter
-  - id: lifetime_cups
+  # Lifetime cups shadow (HA authoritative)
+  - id: lifetime_cups_shadow
     type: uint32_t
     restore_value: yes
     initial_value: "0"
 
-# =========================
+# =====================================================
 # BATTERY (LOW ONLY)
-# =========================
+# =====================================================
 sensor:
   - platform: adc
     pin: GPIO34
@@ -87,22 +86,32 @@ sensor:
     id: wifi_rssi
     update_interval: 20s
 
-# =========================
+  # Lifetime cups from Home Assistant (authoritative)
+  - platform: homeassistant
+    id: lifetime_cups_ha
+    entity_id: sensor.micra_lifetime_cups
+    on_value:
+      then:
+        - lambda: |-
+            id(lifetime_cups_shadow) = (uint32_t)x;
+
+# =====================================================
 # HOME ASSISTANT INPUTS
-# =========================
+# =====================================================
 text_sensor:
   - platform: homeassistant
     id: shot_timer_sensor
-    entity_id: sensor.xxxxxxx_shot_timer
+    entity_id: sensor.micra_shot_timer
     on_value:
       then:
         - lambda: |-
             id(last_activity_ms) = millis();
 
-            int s = atoi(x.c_str());
-            if (s == 1 && millis() - id(last_update_time) > 5000) {
+            int sec = atoi(x.c_str());
+            if (sec == 1 && millis() - id(last_update_time) > 5000) {
               id(cups_used)++;
-              id(lifetime_cups)++;
+              // Increment local shadow; HA will overwrite when online
+              id(lifetime_cups_shadow)++;
             }
 
             id(shot_timer_value) = x;
@@ -110,7 +119,7 @@ text_sensor:
 
   - platform: homeassistant
     id: boiler_temp
-    entity_id: sensor.xxxxxxxx_current_coffee_temperature
+    entity_id: sensor.micra_current_coffee_temperature
 
 binary_sensor:
   # Upper button → LEFT
@@ -158,32 +167,32 @@ binary_sensor:
 
   - platform: homeassistant
     id: machine_power
-    entity_id: switch.xxxxxxxx
+    entity_id: switch.micra_power
 
   - platform: homeassistant
     id: steam_boiler
-    entity_id: switch.xxxxxxx_steam_boiler
+    entity_id: switch.micra_steam_boiler
 
   - platform: homeassistant
     id: water_tank_empty
-    entity_id: binary_sensor.xxxxxxxx_water_tank_empty
+    entity_id: binary_sensor.micra_water_tank_empty
     on_press:
       then:
         - lambda: |-
             id(cups_used) = 0;
 
-# =========================
-# IMAGE (LOGO)
-# =========================
+# =====================================================
+# LOGO IMAGE (TOP-LEVEL)
+# =====================================================
 image:
   - file: images/image.png
     id: lm_logo
-    resize: 40x40
+    resize: 60x60
     type: RGB
 
-# =========================
+# =====================================================
 # DISPLAY
-# =========================
+# =====================================================
 spi:
   clk_pin: GPIO18
   mosi_pin: GPIO19
@@ -242,9 +251,7 @@ display:
     update_interval: 1s
     lambda: |-
 
-      // ==================================
-      // SCREEN BLANKING (MACHINE OFF + IDLE)
-      // ==================================
+      // Blank screen if machine OFF and idle >30s
       if (!id(machine_power).state &&
           millis() - id(last_activity_ms) > 30000) {
         it.fill(BLACK);
@@ -259,7 +266,7 @@ display:
                 wifi::global_wifi_component->is_connected() ? GREEN : RED,
                 wifi::global_wifi_component->is_connected() ? "WiFi" : "NoWiFi");
 
-      // SCREEN 0 — MAIN
+      // ================= SCREEN 0 — MAIN =================
       if (id(screen_index) == 0) {
         it.printf(5, 0, id(header), WHITE,
                   "La Marzocco Linea Micra");
@@ -291,19 +298,20 @@ display:
           it.printf(5, 115, id(header), ORANGE, "READY");
         }
 
-        it.image(190, 100, id(lm_logo));
+        it.image(160, 75, id(lm_logo));
       }
 
-      // SCREEN 1 — NETWORK
+      // ================= SCREEN 1 — NETWORK =================
       if (id(screen_index) == 1) {
         it.printf(5, 0, id(header), WHITE, "Network");
         it.printf(5, 30, id(body), WHITE,
                   wifi::global_wifi_component->is_connected() ? "Connected" : "Offline");
         it.printf(5, 50, id(body), WHITE,
                   "RSSI: %.0f dBm", id(wifi_rssi).state);
+        it.image(160, 60, id(lm_logo));
       }
 
-      // SCREEN 2 — HEAT STATUS
+      // ================= SCREEN 2 — HEAT STATUS =================
       if (id(screen_index) == 2) {
         float t = atof(id(boiler_temp).state.c_str());
         it.printf(5, 0, id(header), WHITE, "Heat Status");
@@ -312,17 +320,19 @@ display:
                   "%.1f", t);
         it.printf(5, 105, id(header), WHITE,
                   t >= 90 ? "READY" : "HEATING...");
+        it.image(160, 75, id(lm_logo));
       }
 
-      // SCREEN 3 — STATS
+      // ================= SCREEN 3 — STATS =================
       if (id(screen_index) == 3) {
         it.printf(5, 0, id(header), WHITE, "Statistics");
         it.printf(5, 30, id(body), WHITE,
                   "Cups left: %d", cups_left);
         it.printf(5, 50, id(body), WHITE,
-                  "Lifetime cups: %u", id(lifetime_cups));
+                  "Lifetime cups: %u", id(lifetime_cups_shadow));
         it.printf(5, 80, id(body), ORANGE,
                   "Hold BOTH buttons");
         it.printf(5, 100, id(body), ORANGE,
                   "to reset cups");
+        it.image(160, 75, id(lm_logo));
       }
